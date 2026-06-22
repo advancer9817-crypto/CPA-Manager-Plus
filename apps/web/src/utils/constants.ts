@@ -18,6 +18,7 @@ export const MANAGEMENT_API_PREFIX = '/v0/management';
 export const REQUEST_TIMEOUT_MS = 30 * 1000;
 export const VERSION_HEADER_KEYS = ['x-cpa-version', 'x-server-version'];
 export const BUILD_DATE_HEADER_KEYS = ['x-cpa-build-date', 'x-server-build-date'];
+export const CPA_SUPPORT_PLUGIN_HEADER_KEYS = ['x-cpa-support-plugin'];
 export const STATUS_UPDATE_INTERVAL_MS = 1000;
 export const LOG_REFRESH_DELAY_MS = 500;
 
@@ -57,7 +58,6 @@ export const OAUTH_CARD_IDS = [
   'codex-oauth-card',
   'anthropic-oauth-card',
   'antigravity-oauth-card',
-  'gemini-cli-oauth-card',
   'kimi-oauth-card',
   'xai-oauth-card'
 ];
@@ -65,7 +65,6 @@ export const OAUTH_PROVIDERS = {
   CODEX: 'codex',
   ANTHROPIC: 'anthropic',
   ANTIGRAVITY: 'antigravity',
-  GEMINI_CLI: 'gemini-cli',
   KIMI: 'kimi',
   XAI: 'xai'
 } as const;

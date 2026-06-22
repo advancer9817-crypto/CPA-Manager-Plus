@@ -447,15 +447,32 @@ func requestHealthTone(calls int64, failureRate float64, future bool) string {
 }
 
 func buildTokenMix(today TodaySummary) []TokenMixSegment {
-	total := today.InputTokens + today.OutputTokens + today.ReasoningTokens +
-		today.CachedTokens + today.CacheReadTokens + today.CacheCreationTokens
+	inputTokens := max(today.InputTokens, int64(0))
+	cachedTokens := max(today.CachedTokens, int64(0)) +
+		max(today.CacheReadTokens, int64(0)) +
+		max(today.CacheCreationTokens, int64(0))
+	outputTokens := max(today.OutputTokens, int64(0))
+	reasoningTokens := max(today.ReasoningTokens, int64(0))
+
+	if today.TotalTokens > 0 {
+		overflow := inputTokens + cachedTokens + outputTokens + reasoningTokens - today.TotalTokens
+		if overflow > 0 {
+			inputDeduction := min(inputTokens, overflow)
+			inputTokens -= inputDeduction
+			overflow -= inputDeduction
+		}
+		if overflow > 0 {
+			outputDeduction := min(outputTokens, overflow)
+			outputTokens -= outputDeduction
+		}
+	}
+
+	total := inputTokens + cachedTokens + outputTokens + reasoningTokens
 	return []TokenMixSegment{
-		{Key: "input", Tokens: today.InputTokens, Share: rate(today.InputTokens, total)},
-		{Key: "output", Tokens: today.OutputTokens, Share: rate(today.OutputTokens, total)},
-		{Key: "reasoning", Tokens: today.ReasoningTokens, Share: rate(today.ReasoningTokens, total)},
-		{Key: "cached", Tokens: today.CachedTokens, Share: rate(today.CachedTokens, total)},
-		{Key: "cache_read", Tokens: today.CacheReadTokens, Share: rate(today.CacheReadTokens, total)},
-		{Key: "cache_creation", Tokens: today.CacheCreationTokens, Share: rate(today.CacheCreationTokens, total)},
+		{Key: "input", Tokens: inputTokens, Share: rate(inputTokens, total)},
+		{Key: "cached", Tokens: cachedTokens, Share: rate(cachedTokens, total)},
+		{Key: "output", Tokens: outputTokens, Share: rate(outputTokens, total)},
+		{Key: "reasoning", Tokens: reasoningTokens, Share: rate(reasoningTokens, total)},
 	}
 }
 

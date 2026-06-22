@@ -15,6 +15,7 @@ import { animate } from 'motion/mini';
 import type { AnimationPlaybackControlsWithThen } from 'motion-dom';
 import { useInterval } from '@/hooks/useInterval';
 import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
+import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
 import { usePageTransitionLayer } from '@/components/common/PageTransitionLayer';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
@@ -47,11 +48,18 @@ import { AuthFileModelsModal } from '@/features/authFiles/components/AuthFileMod
 import { AuthFilesPrefixProxyEditorModal } from '@/features/authFiles/components/AuthFilesPrefixProxyEditorModal';
 import { OAuthExcludedCard } from '@/features/authFiles/components/OAuthExcludedCard';
 import { OAuthModelAliasCard } from '@/features/authFiles/components/OAuthModelAliasCard';
+import { CodexReauthDialog } from '@/features/oauth/CodexReauthDialog';
+import {
+  createCodexReauthTargetFromAuthFile,
+  type CodexReauthTarget,
+} from '@/features/oauth/codexReauthModel';
+import { usageServiceApi, type CodexInspectionResult, type QuotaCooldownInfo } from '@/services/api/usageService';
 import { useAuthFilesData } from '@/features/authFiles/hooks/useAuthFilesData';
 import { useAuthFilesModels } from '@/features/authFiles/hooks/useAuthFilesModels';
 import { useAuthFilesOauth } from '@/features/authFiles/hooks/useAuthFilesOauth';
 import { useAuthFilesPrefixProxyEditor } from '@/features/authFiles/hooks/useAuthFilesPrefixProxyEditor';
 import { useAuthFilesStatusBarCache } from '@/features/authFiles/hooks/useAuthFilesStatusBarCache';
+import { useAntigravitySubscriptions } from '@/features/authFiles/hooks/useAntigravitySubscriptions';
 import {
   BATCH_BAR_BASE_TRANSFORM,
   BATCH_BAR_HIDDEN_TRANSFORM,
@@ -66,6 +74,7 @@ import {
   compareAuthFilePriority,
   easePower2In,
   easePower3Out,
+  getAuthFileCodexInspectionKey,
   getAuthFileCodexInspectionKeyForFile,
   getAuthFileCodexStatus,
   getAuthFilePatchTarget,
@@ -105,6 +114,29 @@ const hasInlineQuotaLayout = (file: AuthFileItem): boolean => {
   return QUOTA_PROVIDER_TYPES.has(provider as QuotaProviderType);
 };
 
+const toAuthFileCodexInspectionSnapshots = (
+  results: CodexInspectionResult[]
+): AuthFileCodexInspectionSnapshot[] =>
+  results.map((item) => ({
+    fileName: item.fileName,
+    authIndex: item.authIndex ?? null,
+    statusCode: item.statusCode ?? null,
+    action: item.action ?? null,
+    usedPercent: item.usedPercent ?? null,
+    isQuota: item.isQuota ?? null,
+  }));
+
+const isStaleCodexReauthSnapshot = (item: AuthFileCodexInspectionSnapshot): boolean => {
+  const action = typeof item.action === 'string' ? item.action.trim().toLowerCase() : '';
+  const statusCode =
+    typeof item.statusCode === 'number'
+      ? item.statusCode
+      : typeof item.statusCode === 'string'
+        ? Number(item.statusCode)
+        : null;
+  return action === 'reauth' || statusCode === 401;
+};
+
 export function AuthFilesPage() {
   const { t } = useTranslation();
   const showNotification = useNotificationStore((state) => state.showNotification);
@@ -113,6 +145,8 @@ export function AuthFilesPage() {
   const managementKey = useAuthStore((state) => state.managementKey);
   const resolvedTheme: ResolvedTheme = useThemeStore((state) => state.resolvedTheme);
   const codexQuota = useQuotaStore((state) => state.codexQuota);
+  const featureAvailability = usePanelFeatureAvailability();
+  const managerServiceBase = featureAvailability.managerServiceBase;
   const pageTransitionLayer = usePageTransitionLayer();
   const isCurrentLayer = pageTransitionLayer ? pageTransitionLayer.status === 'current' : true;
   const navigate = useNavigate();
@@ -138,13 +172,26 @@ export function AuthFilesPage() {
   const [authJsonPasteOpen, setAuthJsonPasteOpen] = useState(false);
   const [batchPriorityOpen, setBatchPriorityOpen] = useState(false);
   const [batchPriorityValue, setBatchPriorityValue] = useState('');
+  const [codexReauthTarget, setCodexReauthTarget] = useState<CodexReauthTarget | null>(null);
   const [lastCodexInspectionResults, setLastCodexInspectionResults] = useState<
     AuthFileCodexInspectionSnapshot[]
   >([]);
+  const [quotaCooldowns, setQuotaCooldowns] = useState<Map<string, QuotaCooldownInfo>>(
+    () => new Map()
+  );
   const floatingBatchActionsRef = useRef<HTMLDivElement>(null);
   const batchActionAnimationRef = useRef<AnimationPlaybackControlsWithThen | null>(null);
   const previousSelectionCountRef = useRef(0);
   const selectionCountRef = useRef(0);
+  // Generation token for in-flight cooldown fetches. Every fetch and every
+  // context identity change bump it, so a slow, superseded response can be
+  // detected and dropped — otherwise it would re-introduce stale badges after
+  // the old context was invalidated.
+  const cooldownReqId = useRef(0);
+  // Tracks the context identity so the layout effect can detect cross-context
+  // transitions synchronously (before passive effects fire) and invalidate any
+  // in-flight request that belongs to the old context.
+  const cooldownContextRef = useRef({ managerServiceBase, managementKey });
 
   const {
     files,
@@ -338,13 +385,51 @@ export function AuthFilesPage() {
     setPageSizeInput(String(pageSize));
   }, [pageSize]);
 
-  useEffect(() => {
-    if (!isCurrentLayer) return;
+  const loadCodexInspectionSnapshots = useCallback(async () => {
     const lastRun = connectionFingerprint
       ? loadCodexInspectionLastRun(connectionFingerprint)
       : null;
+
+    const managerServiceBase = featureAvailability.managerServiceBase;
+    if (
+      !featureAvailability.checking &&
+      featureAvailability.serverCodexInspectionAvailable &&
+      managerServiceBase
+    ) {
+      try {
+        const runs = await usageServiceApi.listCodexInspectionRuns(
+          managerServiceBase,
+          managementKey,
+          1
+        );
+        const latestRun = runs.items[0];
+        if (latestRun) {
+          const detail = await usageServiceApi.getCodexInspectionRun(
+            managerServiceBase,
+            managementKey,
+            latestRun.id
+          );
+          setLastCodexInspectionResults(toAuthFileCodexInspectionSnapshots(detail.results));
+          return;
+        }
+      } catch {
+        // Fall back to the browser-side cache when the manager service is unavailable.
+      }
+    }
+
     setLastCodexInspectionResults(lastRun?.result.results ?? []);
-  }, [connectionFingerprint, isCurrentLayer]);
+  }, [
+    connectionFingerprint,
+    featureAvailability.checking,
+    featureAvailability.managerServiceBase,
+    featureAvailability.serverCodexInspectionAvailable,
+    managementKey,
+  ]);
+
+  useEffect(() => {
+    if (!isCurrentLayer) return;
+    void loadCodexInspectionSnapshots();
+  }, [isCurrentLayer, loadCodexInspectionSnapshots]);
 
   const setCurrentModePageSize = useCallback(
     (next: number) => {
@@ -411,8 +496,13 @@ export function AuthFilesPage() {
   );
 
   const handleHeaderRefresh = useCallback(async () => {
-    await Promise.all([loadFiles(), loadExcluded(), loadModelAlias()]);
-  }, [loadFiles, loadExcluded, loadModelAlias]);
+    await Promise.all([
+      loadFiles(),
+      loadExcluded(),
+      loadModelAlias(),
+      loadCodexInspectionSnapshots(),
+    ]);
+  }, [loadFiles, loadExcluded, loadModelAlias, loadCodexInspectionSnapshots]);
 
   useHeaderRefresh(handleHeaderRefresh);
 
@@ -428,6 +518,57 @@ export function AuthFilesPage() {
       void loadFiles().catch(() => {});
     },
     isCurrentLayer ? 240_000 : null
+  );
+
+  const loadQuotaCooldowns = useCallback(async () => {
+    // Stamp this fetch with a fresh id so a later fetch or context identity
+    // invalidation can supersede it. If the generation has changed by the time
+    // we land, we drop the result instead of writing stale badges back.
+    const id = ++cooldownReqId.current;
+    try {
+      const items = await usageServiceApi.getActiveQuotaCooldowns(managerServiceBase, managementKey);
+      if (id !== cooldownReqId.current) return;
+      const next = new Map<string, QuotaCooldownInfo>();
+      for (const item of items) {
+        if (!item.authFileName) continue;
+        const existing = next.get(item.authFileName);
+        if (!existing || (item.recoverAtMs ?? 0) > (existing.recoverAtMs ?? 0)) {
+          next.set(item.authFileName, item);
+        }
+      }
+      setQuotaCooldowns(next);
+    } catch {
+      // The cooldown badge is a derived hint; fail silently and keep the last known state.
+    }
+  }, [managerServiceBase, managementKey]);
+
+  // Synchronously invalidate in-flight cooldown requests when the context
+  // (managerServiceBase or managementKey) changes, regardless of direction
+  // (A→B, A→empty, empty→A). This runs in the layout phase, before any
+  // passive effect that might fire a new loadQuotaCooldowns, so a stale
+  // response that resolves between renders or inside the gap between a
+  // re-render and its passive effects will find its generation token already
+  // invalidated.
+  useLayoutEffect(() => {
+    const prev = cooldownContextRef.current;
+    if (prev.managerServiceBase === managerServiceBase && prev.managementKey === managementKey) {
+      return;
+    }
+    cooldownContextRef.current = { managerServiceBase, managementKey };
+    cooldownReqId.current += 1;
+    setQuotaCooldowns((current) => (current.size === 0 ? current : new Map()));
+  }, [managerServiceBase, managementKey]);
+
+  useEffect(() => {
+    if (!isCurrentLayer || !managerServiceBase) return;
+    void loadQuotaCooldowns();
+  }, [isCurrentLayer, managerServiceBase, loadQuotaCooldowns]);
+
+  useInterval(
+    () => {
+      void loadQuotaCooldowns();
+    },
+    isCurrentLayer && managerServiceBase ? 60_000 : null
   );
 
   const existingTypes = useMemo(() => {
@@ -621,7 +762,12 @@ export function AuthFilesPage() {
   const totalPages = Math.max(1, Math.ceil(sorted.length / pageSize));
   const currentPage = Math.min(page, totalPages);
   const start = (currentPage - 1) * pageSize;
-  const pageItems = sorted.slice(start, start + pageSize);
+  const pageItems = useMemo(() => sorted.slice(start, start + pageSize), [pageSize, sorted, start]);
+  const antigravitySubscriptionItems = useMemo(
+    () => (normalizedFilter === 'antigravity' ? pageItems : []),
+    [normalizedFilter, pageItems]
+  );
+  const antigravitySubscriptions = useAntigravitySubscriptions(antigravitySubscriptionItems);
   const pageHasInlineQuotaCards = !compactMode && pageItems.some(hasInlineQuotaLayout);
   const selectablePageItems = useMemo(
     () => pageItems.filter((file) => !isRuntimeOnlyAuthFile(file)),
@@ -723,6 +869,21 @@ export function AuthFilesPage() {
     },
     [batchPatchFields, selectedCodexPatchTargets]
   );
+
+  const handleCodexReauthSuccess = useCallback(async () => {
+    const target = codexReauthTarget;
+    await loadFiles();
+    await loadCodexInspectionSnapshots();
+    if (!target?.fileName) return;
+
+    const targetKey = getAuthFileCodexInspectionKey(target.fileName, target.authIndex ?? null);
+    setLastCodexInspectionResults((current) =>
+      current.filter((item) => {
+        const itemKey = getAuthFileCodexInspectionKey(item.fileName, item.authIndex ?? null);
+        return itemKey !== targetKey || !isStaleCodexReauthSnapshot(item);
+      })
+    );
+  }, [codexReauthTarget, loadCodexInspectionSnapshots, loadFiles]);
 
   const openExcludedEditor = useCallback(
     (provider?: string) => {
@@ -1143,6 +1304,7 @@ export function AuthFilesPage() {
               >
                 {pageItems.map((file) => {
                   const authFileKey = getAuthFileCodexInspectionKeyForFile(file);
+                  const codexStatus = codexStatusByAuthFileKey.get(authFileKey);
                   return (
                     <AuthFileCard
                       key={authFileKey}
@@ -1154,8 +1316,14 @@ export function AuthFilesPage() {
                       deleting={deleting}
                       statusUpdating={statusUpdating}
                       statusBarCache={statusBarCache}
-                      codexStatusBadges={codexStatusByAuthFileKey.get(authFileKey)?.badges ?? []}
+                      codexStatusBadges={codexStatus?.badges ?? []}
+                      codexNeedsReauth={codexStatus?.needsReauth ?? false}
+                      antigravitySubscription={antigravitySubscriptions[file.name]}
+                      quotaCooldown={quotaCooldowns.get(file.name)}
                       onShowModels={showModels}
+                      onReauth={(targetFile) =>
+                        setCodexReauthTarget(createCodexReauthTargetFromAuthFile(targetFile))
+                      }
                       onDownload={handleDownload}
                       onOpenPrefixProxyEditor={openPrefixProxyEditor}
                       onDelete={handleDelete}
@@ -1255,6 +1423,13 @@ export function AuthFilesPage() {
           if (!authJsonPasteSaving) setAuthJsonPasteOpen(false);
         }}
         onSave={handleSavePastedAuthJson}
+      />
+
+      <CodexReauthDialog
+        open={Boolean(codexReauthTarget)}
+        target={codexReauthTarget}
+        onClose={() => setCodexReauthTarget(null)}
+        onSuccess={handleCodexReauthSuccess}
       />
 
       <Modal

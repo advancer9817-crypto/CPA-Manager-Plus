@@ -22,3 +22,10 @@
 1. 恢复 `.deploy/cpa-manager-plus` 到旧版本
 2. 恢复 `.deploy/management.html` 到旧版本
 3. 重新加载 systemd: `systemctl --user daemon-reload && cpa restart`
+
+## [迭代] 2026-06-23 — 升级到 v1.8.1
+
+- 从 upstream 同步并合并了 `v1.8.1` 标签的内容
+- 重新构建了前端 (`pnpm build`)
+- 部署了最新构建的 `apps/web/dist/index.html` 到 `.deploy/management.html`
+- 重启了 `cpa-manager-plus` 用户服务

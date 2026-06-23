@@ -938,6 +938,8 @@
   "antigravity_subscription": {
     "subscription_label": "Подписка",
     "loading_short": "Загрузка плана",
+    "refresh_short": "Проверить план",
+    "refresh_button": "Проверить план Antigravity",
     "error_badge": "План недоступен",
     "load_failed": "Не удалось получить подписку: {{message}}",
     "missing_auth_index": "В файле авторизации отсутствует auth_index",
@@ -1723,6 +1725,7 @@
     "codex_inspection_no_pending_actions": "Нет ожидающих предложенных действий.",
     "codex_inspection_no_executable_actions": "Нет исполняемых предложений",
     "codex_inspection_pending_reauth_count": "Ожидает повторного входа {{count}}",
+    "codex_inspection_delete_reauth_count": "Удалить аккаунты с повторным входом {{count}}",
     "codex_inspection_file_name": "Имя файла",
     "codex_inspection_current_state": "Состояние файла авторизации",
     "codex_inspection_http_status": "HTTP статус",
@@ -1752,6 +1755,11 @@
     "codex_inspection_recheck": "Выполнение завершено, процесс завершен",
     "codex_inspection_execute_single_title": "Выполнить действие",
     "codex_inspection_execute_single_body": "Выполнить действие «{{action}}» для аккаунта {{account}}?",
+    "codex_inspection_delete_reauth_now": "Подтвердить удаление",
+    "codex_inspection_delete_reauth_confirm_title": "Удалить аккаунты с повторным входом",
+    "codex_inspection_delete_reauth_confirm_body": "Будет удалено {{count}} файлов авторизации для аккаунтов, которым нужен повторный вход. Удаление выполняется по имени файла и необратимо. Продолжить?",
+    "codex_inspection_delete_reauth_single_title": "Удалить файл авторизации",
+    "codex_inspection_delete_reauth_single_body": "Удалить файл авторизации {{file}} для аккаунта {{account}}? Это действие необратимо.",
     "codex_inspection_action_keep": "Оставить",
     "codex_inspection_action_delete": "Удалить",
     "codex_inspection_action_disable": "Отключить",
@@ -2864,7 +2872,11 @@
     "sort_default": "По умолчанию",
     "sort_name_asc": "Имя A-Z",
     "sort_plan_desc": "План от высокого",
-    "sort_plan_asc": "План от низкого"
+    "sort_plan_asc": "План от низкого",
+    "account_display_masked": "Скрыто",
+    "account_display_full": "Полностью",
+    "show_full_credentials_hint": "Показать полные идентификаторы учётных данных",
+    "show_masked_credentials_hint": "Показать скрытые идентификаторы учётных данных"
   },
   "codex_reauth": {
     "title": "Повторный вход Codex",

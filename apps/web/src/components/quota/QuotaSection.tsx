@@ -41,7 +41,7 @@ type QuotaUpdater<T> = T | ((prev: T) => T);
 type QuotaSetter<T> = (updater: QuotaUpdater<T>) => void;
 
 const MAX_ITEMS_PER_PAGE = 25;
-const MAX_SHOW_ALL_THRESHOLD = 30;
+const MAX_SHOW_ALL_THRESHOLD = 9999;
 
 const stringifySearchValue = (value: unknown): string[] => {
   if (value === undefined || value === null) return [];

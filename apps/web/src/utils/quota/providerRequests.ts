@@ -1,12 +1,14 @@
 import type { TFunction } from 'i18next';
 import type {
   AntigravityQuotaGroup,
+  AntigravityQuotaSubscription,
   AntigravityQuotaSummaryPayload,
   AuthFileItem,
   ClaudeExtraUsage,
   ClaudeProfileResponse,
   ClaudeQuotaWindow,
   ClaudeUsagePayload,
+  CodexRateLimitResetCredit,
   CodexQuotaWindow,
   CodexUsagePayload,
   KimiQuotaRow,
@@ -14,15 +16,20 @@ import type {
   XaiBillingSummary,
 } from '@/types';
 import { apiCallApi, getApiCallErrorMessage } from '@/services/api/apiCall';
+import {
+  antigravitySubscriptionApi,
+  type AntigravitySubscriptionSummary,
+} from '@/services/api/antigravitySubscription';
 import { authFilesApi } from '@/services/api/authFiles';
 import {
-  ANTIGRAVITY_QUOTA_URLS,
+  ANTIGRAVITY_AVAILABLE_MODELS_URLS,
+  ANTIGRAVITY_QUOTA_SUMMARY_URLS,
   ANTIGRAVITY_REQUEST_HEADERS,
   CLAUDE_PROFILE_URL,
   CLAUDE_REQUEST_HEADERS,
   CLAUDE_USAGE_URL,
   CLAUDE_USAGE_WINDOW_KEYS,
-  CODEX_REQUEST_HEADERS,
+  CODEX_RATE_LIMIT_RESET_CREDITS_URL,
   CODEX_USAGE_URL,
   KIMI_REQUEST_HEADERS,
   KIMI_USAGE_URL,
@@ -44,14 +51,22 @@ import {
 } from './parsers';
 import { resolveCodexChatgptAccountId, resolveCodexPlanType } from './resolvers';
 import { buildCodexQuotaWindowInfos } from './codexQuota';
+import {
+  buildCodexResetCreditsRequestHeaders,
+  buildCodexUsageRequestHeaders,
+} from './codexRequestHeaders';
+import { normalizeCodexResetCreditsPayload } from './resetCredits';
 
 const DEFAULT_ANTIGRAVITY_PROJECT_ID = 'bamboo-precept-lgxtn';
+const CODEX_RESET_CREDITS_REQUEST_TIMEOUT_MS = 8000;
 
 export type CodexQuotaData = {
   planType: string | null;
   windows: CodexQuotaWindow[];
   subscriptionActiveUntil: string | null;
   rateLimitResetCreditsAvailableCount: number | null;
+  rateLimitResetCredits: CodexRateLimitResetCredit[];
+  rateLimitResetCreditsError: string | null;
 };
 
 export type ClaudeQuotaData = {
@@ -62,7 +77,41 @@ export type ClaudeQuotaData = {
 
 export type AntigravityQuotaData = {
   groups: AntigravityQuotaGroup[];
+  subscription?: AntigravityQuotaSubscription | null;
   serverTimeOffsetMs: number | null;
+};
+
+const antigravitySubscriptionRequests = new Map<
+  string,
+  Promise<AntigravityQuotaSubscription | null>
+>();
+
+const toAntigravityQuotaSubscription = (
+  summary: AntigravitySubscriptionSummary | null
+): AntigravityQuotaSubscription | null => {
+  if (!summary) return null;
+  return {
+    plan: summary.plan,
+    tierName: summary.tierName,
+    tierId: summary.tierId,
+  };
+};
+
+const fetchAntigravityQuotaSubscription = (
+  authIndex: string
+): Promise<AntigravityQuotaSubscription | null> => {
+  const existing = antigravitySubscriptionRequests.get(authIndex);
+  if (existing) return existing;
+
+  const request = antigravitySubscriptionApi
+    .get(authIndex)
+    .then(toAntigravityQuotaSubscription)
+    .catch(() => null)
+    .finally(() => {
+      antigravitySubscriptionRequests.delete(authIndex);
+    });
+  antigravitySubscriptionRequests.set(authIndex, request);
+  return request;
 };
 
 export const resolveAntigravityProjectId = async (file: AuthFileItem): Promise<string> => {
@@ -144,13 +193,14 @@ export const fetchAntigravityQuota = async (
 
   const projectId = await resolveAntigravityProjectId(file);
   const requestBody = JSON.stringify({ project: projectId });
+  const subscriptionPromise = fetchAntigravityQuotaSubscription(authIndex);
 
   let lastError = '';
   let lastStatus: number | undefined;
   let priorityStatus: number | undefined;
   let hadSuccess = false;
 
-  for (const url of ANTIGRAVITY_QUOTA_URLS) {
+  for (const url of [...ANTIGRAVITY_QUOTA_SUMMARY_URLS, ...ANTIGRAVITY_AVAILABLE_MODELS_URLS]) {
     try {
       const result = await apiCallApi.request({
         authIndex,
@@ -186,6 +236,7 @@ export const fetchAntigravityQuota = async (
 
       return {
         groups,
+        subscription: await subscriptionPromise,
         serverTimeOffsetMs: resolveResponseServerTimeOffsetMs(result.header),
       };
     } catch (err: unknown) {
@@ -201,7 +252,11 @@ export const fetchAntigravityQuota = async (
   }
 
   if (hadSuccess) {
-    return { groups: [], serverTimeOffsetMs: null };
+    return {
+      groups: [],
+      subscription: await subscriptionPromise,
+      serverTimeOffsetMs: null,
+    };
   }
 
   throw createStatusError(lastError || t('common.unknown_error'), priorityStatus ?? lastStatus);
@@ -222,17 +277,6 @@ export const buildCodexQuotaWindows = (
     limitWindowSeconds: window.limitWindowSeconds,
   }));
 
-const buildCodexUsageRequestHeaders = (accountId?: string | null): Record<string, string> => {
-  const headers: Record<string, string> = {
-    ...CODEX_REQUEST_HEADERS,
-  };
-  const trimmedAccountId = String(accountId ?? '').trim();
-  if (trimmedAccountId) {
-    headers['Chatgpt-Account-Id'] = trimmedAccountId;
-  }
-  return headers;
-};
-
 const resolveCodexRateLimitResetCreditsAvailableCount = (
   payload: CodexUsagePayload
 ): number | null => {
@@ -242,6 +286,68 @@ const resolveCodexRateLimitResetCreditsAvailableCount = (
 
 const resolveCodexSubscriptionActiveUntil = (payload: CodexUsagePayload): string | null =>
   normalizeStringValue(payload.subscription_active_until ?? payload.subscriptionActiveUntil);
+
+type CodexResetCreditsData = {
+  availableCount: number | null;
+  credits: CodexRateLimitResetCredit[];
+  error: string | null;
+};
+
+const resolveCodexResetCreditsAvailableCount = (
+  resetCredits: CodexResetCreditsData,
+  usageAvailableCount: number | null
+): number | null => {
+  if (resetCredits.availableCount !== null) return resetCredits.availableCount;
+  if (resetCredits.credits.length > 0) return resetCredits.credits.length;
+  return usageAvailableCount;
+};
+
+const fetchCodexResetCredits = async (
+  authIndex: string,
+  accountId: string | null | undefined,
+  t: TFunction
+): Promise<CodexResetCreditsData> => {
+  try {
+    const result = await apiCallApi.request(
+      {
+        authIndex,
+        method: 'GET',
+        url: CODEX_RATE_LIMIT_RESET_CREDITS_URL,
+        header: buildCodexResetCreditsRequestHeaders(accountId),
+      },
+      { timeout: CODEX_RESET_CREDITS_REQUEST_TIMEOUT_MS }
+    );
+
+    if (result.statusCode < 200 || result.statusCode >= 300) {
+      return {
+        availableCount: null,
+        credits: [],
+        error: getApiCallErrorMessage(result),
+      };
+    }
+
+    const payload = normalizeCodexResetCreditsPayload(result.body ?? result.bodyText);
+    if (payload.invalidPayload) {
+      return {
+        availableCount: null,
+        credits: [],
+        error: t('codex_quota.reset_credits_invalid_payload'),
+      };
+    }
+
+    return {
+      availableCount: payload.availableCount,
+      credits: payload.credits,
+      error: null,
+    };
+  } catch (err: unknown) {
+    return {
+      availableCount: null,
+      credits: [],
+      error: err instanceof Error ? err.message : 'Failed to fetch Codex reset credits',
+    };
+  }
+};
 
 export const fetchCodexQuota = async (
   file: AuthFileItem,
@@ -274,11 +380,18 @@ export const fetchCodexQuota = async (
   const planTypeFromUsage = normalizePlanType(payload.plan_type ?? payload.planType);
   const planType = planTypeFromUsage ?? planTypeFromFile;
   const windows = buildCodexQuotaWindows(payload, t, planType);
+  const usageResetCreditsAvailableCount = resolveCodexRateLimitResetCreditsAvailableCount(payload);
+  const resetCredits = await fetchCodexResetCredits(authIndex, accountId, t);
   return {
     planType,
     windows,
     subscriptionActiveUntil: resolveCodexSubscriptionActiveUntil(payload),
-    rateLimitResetCreditsAvailableCount: resolveCodexRateLimitResetCreditsAvailableCount(payload),
+    rateLimitResetCreditsAvailableCount: resolveCodexResetCreditsAvailableCount(
+      resetCredits,
+      usageResetCreditsAvailableCount
+    ),
+    rateLimitResetCredits: resetCredits.credits,
+    rateLimitResetCreditsError: resetCredits.error,
   };
 };
 

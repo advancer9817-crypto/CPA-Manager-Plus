@@ -9,6 +9,7 @@ import type {
   PluginMenu,
   PluginStoreEntry,
   PluginStoreInstallResult,
+  PluginStorePlatform,
   PluginStoreResponse,
   PluginStoreSource,
   PluginStoreSourceError,
@@ -21,6 +22,14 @@ const asString = (value: unknown): string => {
 };
 
 const asBoolean = (value: unknown): boolean => value === true;
+
+const hasOwn = (source: Record<string, unknown>, key: string): boolean =>
+  Object.prototype.hasOwnProperty.call(source, key);
+
+const normalizePluginOAuthProvider = (value: unknown): string | undefined => {
+  const provider = asString(value).trim();
+  return provider || undefined;
+};
 
 const normalizeConfigField = (value: unknown): PluginConfigField | null => {
   if (!isRecord(value)) return null;
@@ -94,15 +103,22 @@ const normalizePluginEntry = (value: unknown): PluginListEntry | null => {
 
   const metadata = normalizeMetadata(value.metadata);
   const configFields = normalizeConfigFields(value.config_fields ?? value.configFields);
+  const supportsOAuth = asBoolean(value.supports_oauth ?? value.supportsOAuth);
+  const oauthProvider = normalizePluginOAuthProvider(value.oauth_provider ?? value.oauthProvider);
+  const legacyOAuthProvider =
+    supportsOAuth && !hasOwn(value, 'oauth_provider') && !hasOwn(value, 'oauthProvider')
+      ? normalizePluginOAuthProvider(id)
+      : undefined;
 
   return {
     id,
+    oauthProvider: oauthProvider ?? legacyOAuthProvider,
     path: asString(value.path).trim(),
     configured: asBoolean(value.configured),
     registered: asBoolean(value.registered),
     enabled: value.enabled !== false,
     effectiveEnabled: asBoolean(value.effective_enabled ?? value.effectiveEnabled),
-    supportsOAuth: asBoolean(value.supports_oauth ?? value.supportsOAuth),
+    supportsOAuth,
     logo: asString(value.logo || metadata?.logo).trim(),
     configFields: configFields.length > 0 ? configFields : (metadata?.configFields ?? []),
     menus: normalizeMenus(value.menus),
@@ -148,6 +164,16 @@ const normalizeStoreEntry = (value: unknown): PluginStoreEntry | null => {
   const tags = Array.isArray(value.tags)
     ? value.tags.map((item) => asString(item).trim()).filter(Boolean)
     : [];
+  const platforms = Array.isArray(value.platforms)
+    ? (value.platforms
+        .map((item): PluginStorePlatform | null => {
+          if (!isRecord(item)) return null;
+          const goos = asString(item.goos).trim();
+          const goarch = asString(item.goarch).trim();
+          return goos || goarch ? { goos, goarch } : null;
+        })
+        .filter(Boolean) as PluginStorePlatform[])
+    : [];
 
   return {
     storeId: asString(value.store_id ?? value.storeId).trim(),
@@ -160,6 +186,10 @@ const normalizeStoreEntry = (value: unknown): PluginStoreEntry | null => {
     author: asString(value.author).trim(),
     version: asString(value.version).trim(),
     repository: asString(value.repository).trim(),
+    installType: asString(value.install_type ?? value.installType).trim(),
+    authRequired: asBoolean(value.auth_required ?? value.authRequired),
+    authConfigured: asBoolean(value.auth_configured ?? value.authConfigured),
+    platforms,
     logo: asString(value.logo).trim(),
     homepage: asString(value.homepage).trim(),
     license: asString(value.license).trim(),
@@ -241,11 +271,17 @@ export const normalizePluginStoreInstallResult = (value: unknown): PluginStoreIn
     sourceUrl: asString(source.source_url ?? source.sourceUrl).trim(),
     id: asString(source.id).trim(),
     version: asString(source.version).trim(),
+    installType: asString(source.install_type ?? source.installType).trim(),
     path: asString(source.path).trim(),
     pluginsEnabled: asBoolean(source.plugins_enabled ?? source.pluginsEnabled),
     restartRequired: asBoolean(source.restart_required ?? source.restartRequired),
   };
 };
+
+export interface PluginStoreInstallOptions {
+  sourceId?: string;
+  version?: string;
+}
 
 export const pluginsApi = {
   async list(): Promise<PluginListResponse> {
@@ -279,13 +315,20 @@ export const pluginStoreApi = {
     return normalizePluginStoreList(data);
   },
 
-  async install(id: string, options?: { sourceId?: string }): Promise<PluginStoreInstallResult> {
+  async install(
+    id: string,
+    options: PluginStoreInstallOptions = {}
+  ): Promise<PluginStoreInstallResult> {
     const sourceId = options?.sourceId?.trim();
+    const version = options?.version?.trim();
+    const params: Record<string, string> = {};
+    if (sourceId) params.source = sourceId;
+    if (version) params.version = version;
     const data = await apiClient.post(
       `/plugin-store/${encodeURIComponent(id)}/install`,
-      undefined,
+      version ? { version } : undefined,
       {
-        params: sourceId ? { source: sourceId } : undefined,
+        params: Object.keys(params).length > 0 ? params : undefined,
       }
     );
     return normalizePluginStoreInstallResult(data);

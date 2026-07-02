@@ -33,6 +33,7 @@ export interface PluginMenu {
 
 export interface PluginListEntry {
   id: string;
+  oauthProvider?: string;
   path: string;
   configured: boolean;
   registered: boolean;
@@ -71,6 +72,10 @@ export interface PluginStoreEntry {
   author: string;
   version: string;
   repository: string;
+  installType: string;
+  authRequired: boolean;
+  authConfigured: boolean;
+  platforms: PluginStorePlatform[];
   logo: string;
   homepage: string;
   license: string;
@@ -83,6 +88,11 @@ export interface PluginStoreEntry {
   enabled: boolean;
   effectiveEnabled: boolean;
   updateAvailable: boolean;
+}
+
+export interface PluginStorePlatform {
+  goos: string;
+  goarch: string;
 }
 
 export interface PluginStoreSource {
@@ -113,6 +123,7 @@ export interface PluginStoreInstallResult {
   sourceUrl: string;
   id: string;
   version: string;
+  installType: string;
   path: string;
   pluginsEnabled: boolean;
   restartRequired: boolean;

@@ -76,6 +76,7 @@ describe('plugin API normalizers', () => {
     expect(result.plugins).toHaveLength(1);
     expect(result.plugins[0]).toMatchObject({
       id: 'demo',
+      oauthProvider: 'demo',
       enabled: false,
       effectiveEnabled: true,
       supportsOAuth: true,
@@ -86,6 +87,33 @@ describe('plugin API normalizers', () => {
     });
     expect(result.plugins[0]?.configFields[0]?.enumValues).toEqual(['fast', 'safe']);
     expect(result.plugins[0]?.menus[0]?.path).toBe('/plugins/demo/page');
+  });
+
+  it('normalizes explicit plugin OAuth providers without legacy fallback override', () => {
+    const result = normalizePluginList({
+      plugins: [
+        {
+          id: 'legacy-plugin',
+          supports_oauth: true,
+          oauth_provider: 'custom-oauth-provider',
+        },
+        {
+          id: 'no-provider',
+          supports_oauth: true,
+          oauth_provider: '',
+        },
+      ],
+    });
+
+    expect(result.plugins[0]).toMatchObject({
+      id: 'legacy-plugin',
+      oauthProvider: 'custom-oauth-provider',
+    });
+    expect(result.plugins[1]).toMatchObject({
+      id: 'no-provider',
+      supportsOAuth: true,
+    });
+    expect(result.plugins[1]?.oauthProvider).toBeUndefined();
   });
 
   it('normalizes plugin delete results', () => {
@@ -144,6 +172,10 @@ describe('plugin API normalizers', () => {
           source_url: 'https://example.test/registry.json',
           id: 'demo',
           name: 'Demo',
+          install_type: 'github-release',
+          auth_required: true,
+          auth_configured: false,
+          platforms: [{ goos: 'linux', goarch: 'amd64' }],
           installed: true,
           installedVersion: '1.0.0',
           effectiveEnabled: true,
@@ -176,6 +208,10 @@ describe('plugin API normalizers', () => {
       effectiveEnabled: true,
       updateAvailable: true,
       tags: ['tool'],
+      installType: 'github-release',
+      authRequired: true,
+      authConfigured: false,
+      platforms: [{ goos: 'linux', goarch: 'amd64' }],
     });
 
     expect(
@@ -186,6 +222,7 @@ describe('plugin API normalizers', () => {
         source_url: 'https://example.test/registry.json',
         id: 'demo',
         version: '1.1.0',
+        install_type: 'github-release',
         path: '/plugins/demo',
         plugins_enabled: true,
         restart_required: true,
@@ -197,6 +234,7 @@ describe('plugin API normalizers', () => {
       sourceUrl: 'https://example.test/registry.json',
       id: 'demo',
       version: '1.1.0',
+      installType: 'github-release',
       path: '/plugins/demo',
       pluginsEnabled: true,
       restartRequired: true,
@@ -210,11 +248,18 @@ describe('plugin API normalizers', () => {
       id: 'demo/plugin',
     });
 
-    const result = await pluginStoreApi.install('demo/plugin', { sourceId: ' official ' });
-
-    expect(mocks.post).toHaveBeenCalledWith('/plugin-store/demo%2Fplugin/install', undefined, {
-      params: { source: 'official' },
+    const result = await pluginStoreApi.install('demo/plugin', {
+      sourceId: ' official ',
+      version: ' v1.2.3 ',
     });
+
+    expect(mocks.post).toHaveBeenCalledWith(
+      '/plugin-store/demo%2Fplugin/install',
+      { version: 'v1.2.3' },
+      {
+        params: { source: 'official', version: 'v1.2.3' },
+      }
+    );
     expect(result).toMatchObject({
       status: 'installed',
       sourceId: 'official',

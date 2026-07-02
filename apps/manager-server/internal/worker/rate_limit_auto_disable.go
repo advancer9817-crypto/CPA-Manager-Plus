@@ -192,15 +192,16 @@ func (w *RateLimitAutoDisableWorker) handleCandidate(ctx context.Context, candid
 		return
 	}
 
+	resolvedAuthIndex := firstNonEmpty(candidate.AuthIndex, current.AuthIndex)
 	log.Printf("[quota-auto-disable] Codex usage limit reached for auth file %q account=%q provider=%q resetAt=%s, disabling", candidate.FileName, candidate.DisplayAccount, candidate.Provider, candidate.ResetAt.Format(time.RFC3339))
-	if err := w.patchAuthFile(ctx, candidate.BaseURL, candidate.ManagementKey, candidate.FileName, true); err != nil {
+	if err := w.patchAuthFile(ctx, candidate.BaseURL, candidate.ManagementKey, candidate.FileName, resolvedAuthIndex, true); err != nil {
 		log.Printf("[quota-auto-disable] failed to disable auth file %q: %v", candidate.FileName, err)
 		return
 	}
 
 	_, err = w.store.UpsertQuotaCooldown(ctx, store.QuotaCooldownUpsert{
 		AuthFileName:     candidate.FileName,
-		AuthIndex:        firstNonEmpty(candidate.AuthIndex, current.AuthIndex),
+		AuthIndex:        resolvedAuthIndex,
 		AccountSnapshot:  candidate.DisplayAccount,
 		Provider:         strings.ToLower(strings.TrimSpace(candidate.Provider)),
 		RecoverAtMS:      candidate.ResetAt.UnixMilli(),
@@ -211,7 +212,7 @@ func (w *RateLimitAutoDisableWorker) handleCandidate(ctx context.Context, candid
 	})
 	if err != nil {
 		log.Printf("[quota-auto-disable] disabled auth file %q but failed to persist cooldown ownership: %v", candidate.FileName, err)
-		if rollbackErr := w.patchAuthFile(ctx, candidate.BaseURL, candidate.ManagementKey, candidate.FileName, false); rollbackErr != nil {
+		if rollbackErr := w.patchAuthFile(ctx, candidate.BaseURL, candidate.ManagementKey, candidate.FileName, resolvedAuthIndex, false); rollbackErr != nil {
 			log.Printf("[quota-auto-disable] failed to roll back auth file %q after cooldown persistence error: %v", candidate.FileName, rollbackErr)
 		}
 		return
@@ -308,7 +309,7 @@ func (w *RateLimitAutoDisableWorker) recoverCooldown(ctx context.Context, baseUR
 	}
 
 	log.Printf("[quota-auto-disable] reset time reached for auth file %q account=%q, enabling", item.AuthFileName, item.AccountSnapshot)
-	if err := w.patchAuthFile(ctx, baseURL, managementKey, item.AuthFileName, false); err != nil {
+	if err := w.patchAuthFile(ctx, baseURL, managementKey, item.AuthFileName, item.AuthIndex, false); err != nil {
 		_ = w.store.RecordQuotaCooldownFailure(ctx, item.ID, err.Error())
 		log.Printf("[quota-auto-disable] failed to enable auth file %q: %v", item.AuthFileName, err)
 		return
@@ -351,6 +352,9 @@ func codexUsageLimitResetTimeFromEvent(event usage.Event, now time.Time) (time.T
 	if provider != "codex" {
 		return time.Time{}, false
 	}
+	if resetAt, ok := codexUsageLimitResetTimeFromHeaders(event, now); ok {
+		return resetAt, true
+	}
 	for _, text := range []string{event.FailBody, event.RawJSON, event.FailSummary} {
 		var resetAt time.Time
 		found := false
@@ -367,6 +371,114 @@ func codexUsageLimitResetTimeFromEvent(event usage.Event, now time.Time) (time.T
 		}
 	}
 	return time.Time{}, false
+}
+
+func codexUsageLimitResetTimeFromHeaders(event usage.Event, now time.Time) (time.Time, bool) {
+	metadata := event.ResponseMetadata
+	if metadata == nil && event.ResponseMetadataJSON != "" {
+		metadata = usage.ResponseHeaderMetadataFromJSON(event.ResponseMetadataJSON)
+	}
+	if metadata == nil {
+		return time.Time{}, false
+	}
+	resetAtMS := int64(0)
+	if !codexUsageLimitSignalFromHeaders(event, metadata) {
+		return time.Time{}, false
+	}
+	if metadata.Quota != nil {
+		resetAtMS = codexQuotaReachedResetAtMS(metadata.Quota)
+	}
+	if resetAtMS <= 0 && metadata.Errors != nil {
+		resetAtMS = metadata.Errors.RetryAfterRecoverAtMS
+	}
+	if resetAtMS <= 0 {
+		return time.Time{}, false
+	}
+	resetAt := time.UnixMilli(resetAtMS)
+	return resetAt, resetAt.After(now)
+}
+
+func codexUsageLimitSignalFromHeaders(event usage.Event, metadata *usage.ResponseHeaderMetadata) bool {
+	if metadata == nil {
+		return false
+	}
+	if metadata.Quota != nil && strings.TrimSpace(metadata.Quota.RateLimitReachedType) != "" {
+		return true
+	}
+	if metadata.Quota != nil && codexQuotaHasFullWindow(metadata.Quota) {
+		return true
+	}
+	values := []string{event.HeaderErrorKind, event.HeaderErrorCode}
+	if metadata.Errors != nil {
+		values = append(
+			values,
+			metadata.Errors.Kind,
+			metadata.Errors.Code,
+			metadata.Errors.AuthorizationError,
+			metadata.Errors.IDEErrorCode,
+			metadata.Errors.IDERootErrorCode,
+		)
+	}
+	for _, value := range values {
+		if isCodexUsageLimitSignalText(value) {
+			return true
+		}
+	}
+	return false
+}
+
+func isCodexUsageLimitSignalText(value string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	normalized = strings.ReplaceAll(normalized, "-", "_")
+	return strings.Contains(normalized, "usage_limit_reached")
+}
+
+func codexQuotaReachedResetAtMS(quota *usage.HeaderQuotaMetadata) int64 {
+	if quota == nil {
+		return 0
+	}
+	switch strings.ToLower(strings.TrimSpace(quota.RateLimitReachedType)) {
+	case "primary":
+		return quotaWindowResetAtMS(quota.Primary)
+	case "secondary":
+		return quotaWindowResetAtMS(quota.Secondary)
+	default:
+		return codexQuotaFullWindowResetAtMS(quota)
+	}
+}
+
+func codexQuotaHasFullWindow(quota *usage.HeaderQuotaMetadata) bool {
+	if quota == nil {
+		return false
+	}
+	return quotaWindowUsedAtLimit(quota.Primary) || quotaWindowUsedAtLimit(quota.Secondary)
+}
+
+func codexQuotaFullWindowResetAtMS(quota *usage.HeaderQuotaMetadata) int64 {
+	if quota == nil {
+		return 0
+	}
+	resetAtMS := int64(0)
+	for _, window := range []*usage.HeaderQuotaWindow{quota.Primary, quota.Secondary} {
+		if !quotaWindowUsedAtLimit(window) {
+			continue
+		}
+		if reset := quotaWindowResetAtMS(window); reset > resetAtMS {
+			resetAtMS = reset
+		}
+	}
+	return resetAtMS
+}
+
+func quotaWindowUsedAtLimit(window *usage.HeaderQuotaWindow) bool {
+	return window != nil && window.UsedPercent != nil && *window.UsedPercent >= 100
+}
+
+func quotaWindowResetAtMS(window *usage.HeaderQuotaWindow) int64 {
+	if window == nil {
+		return 0
+	}
+	return window.ResetAtMS
 }
 
 // forEachJSONValue decodes every JSON value found in text, calling fn for each.
@@ -527,16 +639,12 @@ func parseCommonTime(text string) (time.Time, bool) {
 }
 
 func (w *RateLimitAutoDisableWorker) currentAuthFile(ctx context.Context, baseURL string, managementKey string, fileName string, authIndex string) (authFile, bool, error) {
-	files, err := cpaauthfiles.New(w.client, quotaAutoDisableActionTimeout).Fetch(ctx, baseURL, managementKey)
-	if err != nil {
-		return authFile{}, false, err
-	}
-	file, ok := cpaauthfiles.Find(files, fileName, authIndex)
-	return file, ok, nil
+	file, ok, err := cpaauthfiles.New(w.client, quotaAutoDisableActionTimeout).Find(ctx, baseURL, managementKey, fileName, authIndex)
+	return file, ok, err
 }
 
-func (w *RateLimitAutoDisableWorker) patchAuthFile(ctx context.Context, baseURL string, managementKey string, fileName string, disabled bool) error {
-	return cpaauthfiles.New(w.client, quotaAutoDisableActionTimeout).PatchDisabled(ctx, baseURL, managementKey, fileName, disabled)
+func (w *RateLimitAutoDisableWorker) patchAuthFile(ctx context.Context, baseURL string, managementKey string, fileName string, authIndex string, disabled bool) error {
+	return cpaauthfiles.New(w.client, quotaAutoDisableActionTimeout).PatchDisabled(ctx, baseURL, managementKey, fileName, disabled, authIndex)
 }
 
 func firstNonEmpty(values ...string) string {

@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -158,13 +159,7 @@ func (w *AccountActionCandidateWorker) maybeAutoDisable(ctx context.Context, ite
 		return
 	}
 	client := cpaauthfiles.New(nil)
-	files, err := client.Fetch(ctx, baseURL, managementKey)
-	if err != nil {
-		_ = w.store.RecordAccountActionCandidateFailure(ctx, item.ID, err.Error())
-		log.Printf("[account-action] auto-disable verification failed for pending candidate %d authFile=%q: %v", item.ID, item.AuthFileName, err)
-		return
-	}
-	current, err := cpaauthfiles.VerifyIdentity(files, cpaauthfiles.Identity{
+	current, err := client.Verify(ctx, baseURL, managementKey, cpaauthfiles.Identity{
 		AuthFileName:      item.AuthFileName,
 		AuthIndex:         item.AuthIndex,
 		Provider:          item.Provider,
@@ -172,16 +167,21 @@ func (w *AccountActionCandidateWorker) maybeAutoDisable(ctx context.Context, ite
 		AccountIDSnapshot: item.AccountIDSnapshot,
 	})
 	if err != nil {
-		reason := "current CPA auth file identity verification failed: " + err.Error()
-		_ = w.store.RecordAccountActionCandidateFailure(ctx, item.ID, reason)
-		log.Printf("[account-action] auto-disable skipped for pending candidate %d authFile=%q reason=identity_verification_failed detail=%v", item.ID, item.AuthFileName, err)
+		if errors.Is(err, cpaauthfiles.ErrAuthFileNotFound) || errors.Is(err, cpaauthfiles.ErrIdentityMismatch) {
+			reason := "current CPA auth file identity verification failed: " + err.Error()
+			_ = w.store.RecordAccountActionCandidateFailure(ctx, item.ID, reason)
+			log.Printf("[account-action] auto-disable skipped for pending candidate %d authFile=%q reason=identity_verification_failed detail=%v", item.ID, item.AuthFileName, err)
+			return
+		}
+		_ = w.store.RecordAccountActionCandidateFailure(ctx, item.ID, err.Error())
+		log.Printf("[account-action] auto-disable verification failed for pending candidate %d authFile=%q: %v", item.ID, item.AuthFileName, err)
 		return
 	}
 	if current.Disabled {
 		log.Printf("[account-action] auto-disable skipped for pending candidate %d authFile=%q reason=already_disabled", item.ID, item.AuthFileName)
 		return
 	}
-	if err := client.PatchDisabled(ctx, baseURL, managementKey, item.AuthFileName, true); err != nil {
+	if err := client.PatchDisabled(ctx, baseURL, managementKey, item.AuthFileName, true, item.AuthIndex); err != nil {
 		_ = w.store.RecordAccountActionCandidateFailure(ctx, item.ID, err.Error())
 		log.Printf("[account-action] auto-disable patch failed for pending candidate %d authFile=%q: %v", item.ID, item.AuthFileName, err)
 		return
@@ -246,7 +246,10 @@ func classifyAccountActionEvent(event usage.Event) (string, string, bool) {
 		return "", "", false
 	}
 
-	if strings.Contains(text, "token_revoked") || strings.Contains(text, "invalidated_oauth_token") || strings.Contains(text, "invalidated oauth token") || strings.Contains(text, "oauth token revoked") {
+	if strings.Contains(text, "account_deactivated") {
+		return model.AccountActionTypeDelete, "Account is deactivated; review and delete the stale auth file if appropriate", true
+	}
+	if strings.Contains(text, "token_revoked") || strings.Contains(text, "token_invalidated") || strings.Contains(text, "invalidated_oauth_token") || strings.Contains(text, "invalidated oauth token") || strings.Contains(text, "oauth token revoked") {
 		return model.AccountActionTypeReauth, "OAuth token revoked / invalidated; reauthorize the account with OAuth", true
 	}
 	if strings.Contains(text, "invalid_grant") || strings.Contains(text, "reauth") || strings.Contains(text, "auth_unavailable") {
@@ -259,6 +262,9 @@ func classifyAccountActionEvent(event usage.Event) (string, string, bool) {
 }
 
 func accountActionErrorCodeAndType(event usage.Event) (string, string) {
+	if code, typ := accountActionHeaderErrorCodeAndType(event); code != "" || typ != "" {
+		return code, typ
+	}
 	for _, text := range []string{event.FailBody, event.RawJSON, event.FailSummary} {
 		var code, typ string
 		found := false
@@ -275,6 +281,21 @@ func accountActionErrorCodeAndType(event usage.Event) (string, string) {
 		}
 	}
 	return "", ""
+}
+
+func accountActionHeaderErrorCodeAndType(event usage.Event) (string, string) {
+	if event.HeaderErrorCode != "" || event.HeaderErrorKind != "" {
+		return event.HeaderErrorCode, event.HeaderErrorKind
+	}
+	metadata := event.ResponseMetadata
+	if metadata == nil && event.ResponseMetadataJSON != "" {
+		metadata = usage.ResponseHeaderMetadataFromJSON(event.ResponseMetadataJSON)
+	}
+	if metadata == nil || metadata.Errors == nil {
+		return "", ""
+	}
+	code := firstNonEmpty(metadata.Errors.IDERootErrorCode, metadata.Errors.IDEErrorCode, metadata.Errors.AuthorizationError, metadata.Errors.Code)
+	return code, metadata.Errors.Kind
 }
 
 func accountActionErrorCodeAndTypeFromJSON(value any) (string, string, bool) {
@@ -317,6 +338,9 @@ func buildAccountActionEvidenceJSON(event usage.Event, actionType string, reason
 		"failSummary":       event.FailSummary,
 		"errorCode":         code,
 		"errorType":         typ,
+		"headerErrorKind":   event.HeaderErrorKind,
+		"headerErrorCode":   event.HeaderErrorCode,
+		"headerTraceId":     event.HeaderTraceID,
 		"authIndex":         event.AuthIndex,
 		"authFileName":      event.AuthFileSnapshot,
 		"accountSnapshot":   event.AccountSnapshot,

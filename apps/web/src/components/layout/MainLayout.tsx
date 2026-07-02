@@ -7,12 +7,13 @@ import {
   useRef,
   useState,
 } from 'react';
-import { NavLink, useLocation } from 'react-router-dom';
+import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/Button';
 import { PageTransition } from '@/components/common/PageTransition';
 import { MainRoutes } from '@/router/MainRoutes';
 import {
+  IconGithub,
   IconSidebarAuthFiles,
   IconSidebarConfig,
   IconSidebarDashboard,
@@ -33,6 +34,7 @@ import {
   useLanguageStore,
   useNotificationStore,
   useThemeStore,
+  useVisualEffectsStore,
 } from '@/stores';
 import { pluginsApi } from '@/services/api';
 import {
@@ -46,11 +48,13 @@ import {
 import { triggerHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { usePanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
 import { isFileLogsAvailable } from '@/features/logs/logFeatureAvailability';
+import { getDemoLogoutPath, prefixRouteBase, stripRouteBase } from '@/features/demo/demoMode';
 import { LANGUAGE_LABEL_KEYS, LANGUAGE_ORDER, STORAGE_KEY_SIDEBAR } from '@/utils/constants';
 import { isSupportedLanguage } from '@/utils/language';
-import type { Theme } from '@/types';
+import type { Theme, VisualEffectsMode } from '@/types';
 
 const SIDEBAR_ICON_SIZE = 20;
+const GITHUB_REPOSITORY_URL = 'https://github.com/seakee/CPA-Manager-Plus';
 
 const sidebarIcons: Record<string, ReactNode> = {
   dashboard: <IconSidebarDashboard size={SIDEBAR_ICON_SIZE} />,
@@ -151,6 +155,23 @@ const headerIcons = {
       <path d="M9.5 15v-2h2" />
     </svg>
   ),
+  visualEffectsFull: (
+    <svg {...headerIconProps}>
+      <path d="m12 3 1.85 5.15L19 10l-5.15 1.85L12 17l-1.85-5.15L5 10l5.15-1.85L12 3z" />
+      <path d="M5 3v4" />
+      <path d="M3 5h4" />
+      <path d="M19 17v4" />
+      <path d="M17 19h4" />
+    </svg>
+  ),
+  visualEffectsReduced: (
+    <svg {...headerIconProps}>
+      <path d="M4 14a8 8 0 0 1 16 0" />
+      <path d="M12 14l4-5" />
+      <path d="M8 14h8" />
+      <path d="M5 19h14" />
+    </svg>
+  ),
   logout: (
     <svg {...headerIconProps}>
       <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
@@ -168,6 +189,19 @@ const THEME_OPTIONS: Array<{
   { key: 'auto', labelKey: 'theme.auto', icon: headerIcons.autoTheme },
   { key: 'white', labelKey: 'theme.white', icon: headerIcons.sun },
   { key: 'dark', labelKey: 'theme.dark', icon: headerIcons.moon },
+];
+
+const VISUAL_EFFECTS_OPTIONS: Array<{
+  key: VisualEffectsMode;
+  labelKey: string;
+  icon: ReactNode;
+}> = [
+  { key: 'full', labelKey: 'visual_effects.full', icon: headerIcons.visualEffectsFull },
+  {
+    key: 'reduced',
+    labelKey: 'visual_effects.reduced',
+    icon: headerIcons.visualEffectsReduced,
+  },
 ];
 
 function PluginSidebarIcon({ src }: { src: string }) {
@@ -189,10 +223,17 @@ type NavItem = {
   exact?: boolean;
 };
 
-export function MainLayout() {
+interface MainLayoutProps {
+  routeBase?: string;
+  demoMode?: boolean;
+}
+
+export function MainLayout({ routeBase = '', demoMode = false }: MainLayoutProps = {}) {
   const { t } = useTranslation();
   const { showNotification } = useNotificationStore();
   const location = useLocation();
+  const navigate = useNavigate();
+  const routePathname = stripRouteBase(location.pathname, routeBase);
 
   const logout = useAuthStore((state) => state.logout);
   const connectionStatus = useAuthStore((state) => state.connectionStatus);
@@ -206,6 +247,8 @@ export function MainLayout() {
 
   const theme = useThemeStore((state) => state.theme);
   const setTheme = useThemeStore((state) => state.setTheme);
+  const visualEffectsMode = useVisualEffectsStore((state) => state.mode);
+  const setVisualEffectsMode = useVisualEffectsStore((state) => state.setMode);
   const language = useLanguageStore((state) => state.language);
   const setLanguage = useLanguageStore((state) => state.setLanguage);
 
@@ -219,16 +262,18 @@ export function MainLayout() {
   });
   const [languageMenuOpen, setLanguageMenuOpen] = useState(false);
   const [themeMenuOpen, setThemeMenuOpen] = useState(false);
+  const [visualEffectsMenuOpen, setVisualEffectsMenuOpen] = useState(false);
   const [pluginResources, setPluginResources] = useState<PluginResourceEntry[]>([]);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const languageMenuRef = useRef<HTMLDivElement | null>(null);
   const themeMenuRef = useRef<HTMLDivElement | null>(null);
+  const visualEffectsMenuRef = useRef<HTMLDivElement | null>(null);
   const headerRef = useRef<HTMLElement | null>(null);
 
   const fullBrandName = 'CPA Manager Plus';
   const abbrBrandName = t('title.abbr');
-  const isLogsPage = location.pathname.startsWith('/logs');
-  const isPluginResourcePage = location.pathname.startsWith('/plugin-pages');
+  const isLogsPage = routePathname.startsWith('/logs');
+  const isPluginResourcePage = routePathname.startsWith('/plugin-pages');
   const showSidebarLabels = !sidebarCollapsed || sidebarOpen;
   const pluginControlMenuVisible = isPluginManagementNavVisible({ supportsPlugin });
   const configPluginsEnabled = config?.pluginsEnabled;
@@ -346,14 +391,48 @@ export function MainLayout() {
     };
   }, [themeMenuOpen]);
 
+  useEffect(() => {
+    if (!visualEffectsMenuOpen) {
+      return;
+    }
+
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!visualEffectsMenuRef.current?.contains(event.target as Node)) {
+        setVisualEffectsMenuOpen(false);
+      }
+    };
+
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setVisualEffectsMenuOpen(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handlePointerDown);
+    document.addEventListener('keydown', handleEscape);
+
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+      document.removeEventListener('keydown', handleEscape);
+    };
+  }, [visualEffectsMenuOpen]);
+
   const toggleLanguageMenu = useCallback(() => {
     setLanguageMenuOpen((prev) => !prev);
     setThemeMenuOpen(false);
+    setVisualEffectsMenuOpen(false);
   }, []);
 
   const toggleThemeMenu = useCallback(() => {
     setThemeMenuOpen((prev) => !prev);
     setLanguageMenuOpen(false);
+    setVisualEffectsMenuOpen(false);
+  }, []);
+
+  const toggleVisualEffectsMenu = useCallback(() => {
+    setVisualEffectsMenuOpen((prev) => !prev);
+    setLanguageMenuOpen(false);
+    setThemeMenuOpen(false);
   }, []);
 
   const handleThemeSelect = useCallback(
@@ -362,6 +441,14 @@ export function MainLayout() {
       setThemeMenuOpen(false);
     },
     [setTheme]
+  );
+
+  const handleVisualEffectsSelect = useCallback(
+    (nextMode: VisualEffectsMode) => {
+      setVisualEffectsMode(nextMode);
+      setVisualEffectsMenuOpen(false);
+    },
+    [setVisualEffectsMode]
   );
 
   const handleLanguageSelect = useCallback(
@@ -469,9 +556,7 @@ export function MainLayout() {
         path: resource.route,
         label: resource.label,
         shortLabel: resource.label,
-        icon: (
-          <PluginSidebarIcon src={resolvePluginAssetURL(resource.pluginLogo, apiBase)} />
-        ),
+        icon: <PluginSidebarIcon src={resolvePluginAssetURL(resource.pluginLogo, apiBase)} />,
       }))
     : [];
   const navSections: NavItem[][] = [
@@ -608,13 +693,20 @@ export function MainLayout() {
     }
     showNotification(t('notification.data_refreshed'), 'success');
   };
+  const handleLogout = () => {
+    if (demoMode) {
+      navigate(getDemoLogoutPath(routeBase), { replace: true });
+      return;
+    }
+    logout();
+  };
   const mobileSidebarToggleLabel = sidebarOpen
     ? t('sidebar.toggle_collapse', { defaultValue: 'Close navigation' })
     : t('sidebar.toggle_expand', { defaultValue: 'Open navigation' });
   const normalizedLocationPath =
-    location.pathname.length > 1 && location.pathname.endsWith('/')
-      ? location.pathname.slice(0, -1)
-      : location.pathname;
+    routePathname.length > 1 && routePathname.endsWith('/')
+      ? routePathname.slice(0, -1)
+      : routePathname;
   const currentPath = normalizedLocationPath === '/dashboard' ? '/' : normalizedLocationPath;
   const matchesNavPath = (item: NavItem, pathname: string) =>
     item.path === '/' || item.exact
@@ -685,6 +777,19 @@ export function MainLayout() {
             >
               {headerIcons.refresh}
             </Button>
+
+            <a
+              className="btn btn-ghost btn-sm"
+              href={GITHUB_REPOSITORY_URL}
+              target="_blank"
+              rel="noreferrer"
+              title={t('header.open_github')}
+              aria-label={t('header.open_github')}
+            >
+              <span>
+                <IconGithub size={16} />
+              </span>
+            </a>
 
             <div
               className={`language-menu ${languageMenuOpen ? 'open' : ''}`}
@@ -763,10 +868,54 @@ export function MainLayout() {
               )}
             </div>
 
+            <div
+              className={`visual-effects-menu ${visualEffectsMenuOpen ? 'open' : ''}`}
+              ref={visualEffectsMenuRef}
+            >
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={toggleVisualEffectsMenu}
+                title={t('visual_effects.switch')}
+                aria-label={t('visual_effects.switch')}
+                aria-haspopup="menu"
+                aria-expanded={visualEffectsMenuOpen}
+              >
+                {visualEffectsMode === 'full'
+                  ? headerIcons.visualEffectsFull
+                  : headerIcons.visualEffectsReduced}
+              </Button>
+              {visualEffectsMenuOpen && (
+                <div
+                  className="notification entering visual-effects-menu-popover"
+                  role="menu"
+                  aria-label={t('visual_effects.switch')}
+                >
+                  {VISUAL_EFFECTS_OPTIONS.map((option) => (
+                    <button
+                      key={option.key}
+                      type="button"
+                      className={`visual-effects-option ${
+                        visualEffectsMode === option.key ? 'active' : ''
+                      }`}
+                      onClick={() => handleVisualEffectsSelect(option.key)}
+                      role="menuitemradio"
+                      aria-checked={visualEffectsMode === option.key}
+                      title={t(option.labelKey)}
+                      aria-label={t(option.labelKey)}
+                    >
+                      <span className="visual-effects-option-icon">{option.icon}</span>
+                      <span className="visual-effects-option-label">{t(option.labelKey)}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
             <Button
               variant="ghost"
               size="sm"
-              onClick={logout}
+              onClick={handleLogout}
               title={t('header.logout')}
               aria-label={t('header.logout')}
             >
@@ -806,12 +955,10 @@ export function MainLayout() {
                 {section.map((item) => (
                   <NavLink
                     key={item.path}
-                    to={item.path}
+                    to={prefixRouteBase(item.path, routeBase)}
                     end={item.path === '/' || item.exact}
                     className={({ isActive }) =>
-                      `nav-item ${
-                        isActive || matchesNavPath(item, currentPath) ? 'active' : ''
-                      }`
+                      `nav-item ${isActive || matchesNavPath(item, currentPath) ? 'active' : ''}`
                     }
                     onClick={() => setSidebarOpen(false)}
                     title={item.label}
@@ -847,9 +994,15 @@ export function MainLayout() {
               .join(' ')}
           >
             <PageTransition
-              render={(location) => <MainRoutes location={location} />}
-              getRouteOrder={getRouteOrder}
-              getTransitionVariant={getTransitionVariant}
+              key={routeBase || 'main'}
+              render={(location) => <MainRoutes location={location} routeBase={routeBase} />}
+              getRouteOrder={(pathname) => getRouteOrder(stripRouteBase(pathname, routeBase))}
+              getTransitionVariant={(fromPathname, toPathname) =>
+                getTransitionVariant(
+                  stripRouteBase(fromPathname, routeBase),
+                  stripRouteBase(toPathname, routeBase)
+                )
+              }
               scrollContainerRef={contentRef}
             />
           </main>

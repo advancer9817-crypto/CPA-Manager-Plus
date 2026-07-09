@@ -45,6 +45,8 @@ interface LatestVersions {
   latestApi: string;
 }
 
+const BUILD_DATE_PLACEHOLDERS = new Set(['unknown', 'dev', 'none']);
+
 type HealthTone = 'ok' | 'warn' | 'error' | 'muted';
 
 interface HealthItem {
@@ -113,15 +115,14 @@ export function VersionCard({
   useEffect(() => {
     let cancelled = false;
 
-    const tasks: Array<Promise<Partial<LatestVersions>>> = [
-      versionApi
-        .checkManagerLatest()
-        .then((data) => ({ latestApp: readManagerLatestTag(data) }))
-        .catch(() => ({})),
-    ];
+    const tasks: Array<Promise<Partial<LatestVersions>>> = [];
 
     if (connectionStatus === 'connected') {
       tasks.push(
+        versionApi
+          .checkManagerLatest()
+          .then((data) => ({ latestApp: readManagerLatestTag(data) }))
+          .catch(() => ({})),
         versionApi
           .checkLatest()
           .then((data) => ({ latestApi: readApiLatestVersion(data) }))
@@ -304,9 +305,10 @@ export function VersionCard({
     [apiVersion, latest.latestApi, t]
   );
 
-  const buildTimeDisplay = serverBuildDate
-    ? new Date(serverBuildDate).toLocaleString(i18n.language)
-    : t('dashboard.version_unknown');
+  const buildTimeDisplay =
+    serverBuildDate && !BUILD_DATE_PLACEHOLDERS.has(serverBuildDate)
+      ? new Date(serverBuildDate).toLocaleString(i18n.language)
+      : t('dashboard.version_unknown');
 
   const collector = collectorStatus?.collector;
   const collectorLastError = collector?.lastError?.trim() || '';
